@@ -4,6 +4,7 @@ import { ImageFile } from '@udonarium/core/file-storage/image-file';
 import { ObjectStore } from '@udonarium/core/synchronize-object/object-store';
 import { EventSystem, Network } from '@udonarium/core/system';
 import { PeerContext } from '@udonarium/core/system/network/peer-context';
+import { ResettableTimeout } from '@udonarium/core/system/util/resettable-timeout';
 import { DiceBot } from '@udonarium/dice-bot';
 import { GameCharacter } from '@udonarium/game-character';
 import { PeerCursor } from '@udonarium/peer-cursor';
@@ -14,6 +15,7 @@ import { PointerDeviceService } from 'service/pointer-device.service';
 import { FileSelecterComponent } from 'component/file-selecter/file-selecter.component';
 import { ModalService } from 'service/modal.service';
 import { PeerCursorComponent } from 'component/peer-cursor/peer-cursor.component';
+import { TabletopService } from 'service/tabletop.service';
 
 @Component({
   selector: 'chat-input',
@@ -76,7 +78,7 @@ export class ChatInputComponent implements OnInit, OnDestroy {
 
   private writingEventInterval: NodeJS.Timer = null;
   private previousWritingLength: number = 0;
-  writingPeers: Map<string, NodeJS.Timer> = new Map();
+  writingPeers: Map<string, ResettableTimeout> = new Map();
   writingPeerNames: string[] = [];
 
   get diceBotInfos() { return DiceBot.diceBotInfos }
@@ -86,6 +88,7 @@ export class ChatInputComponent implements OnInit, OnDestroy {
   constructor(
     private ngZone: NgZone,
     public chatMessageService: ChatMessageService,
+    private tabletopService: TabletopService,
     private panelService: PanelService,
     private pointerDeviceService: PointerDeviceService,
     private modalService: ModalService
@@ -96,9 +99,10 @@ export class ChatInputComponent implements OnInit, OnDestroy {
       .on('MESSAGE_ADDED', event => {
         if (event.data.tabIdentifier !== this.chatTabidentifier) return;
         let message = ObjectStore.instance.get<ChatMessage>(event.data.messageIdentifier);
-        let sendFrom = message ? message.from : '?';
+        let peerCursor = ObjectStore.instance.getObjects<PeerCursor>(PeerCursor).find(obj => obj.userId === message.from);
+        let sendFrom = peerCursor ? peerCursor.peerId : '?';
         if (this.writingPeers.has(sendFrom)) {
-          clearTimeout(this.writingPeers.get(sendFrom));
+          this.writingPeers.get(sendFrom).stop();
           this.writingPeers.delete(sendFrom);
           this.updateWritingPeerNames();
         }
@@ -118,30 +122,33 @@ export class ChatInputComponent implements OnInit, OnDestroy {
       })
       .on('DISCONNECT_PEER', event => {
         let object = ObjectStore.instance.get(this.sendTo);
-        if (object instanceof PeerCursor && object.peerId === event.data.peer) {
+        if (object instanceof PeerCursor && object.peerId === event.data.peerId) {
           this.sendTo = '';
         }
       })
       .on<string>('WRITING_A_MESSAGE', event => {
         if (event.isSendFromSelf || event.data !== this.chatTabidentifier) return;
-        this.ngZone.run(() => {
-          if (this.writingPeers.has(event.sendFrom)) clearTimeout(this.writingPeers.get(event.sendFrom));
-          this.writingPeers.set(event.sendFrom, setTimeout(() => {
+        if (!this.writingPeers.has(event.sendFrom)) {
+          this.writingPeers.set(event.sendFrom, new ResettableTimeout(() => {
             this.writingPeers.delete(event.sendFrom);
             this.updateWritingPeerNames();
+            this.ngZone.run(() => { });
           }, 2000));
-          this.updateWritingPeerNames();
-        });
+        }
+        this.writingPeers.get(event.sendFrom).reset();
+        this.updateWritingPeerNames();
+        this.tabletopService.addBatch(() => this.ngZone.run(() => { }), this);
       });
   }
 
   ngOnDestroy() {
     EventSystem.unregister(this);
+    this.tabletopService.removeBatch(this);
   }
 
   private updateWritingPeerNames() {
     this.writingPeerNames = Array.from(this.writingPeers.keys()).map(peerId => {
-      let peer = PeerCursor.find(peerId);
+      let peer = PeerCursor.findByPeerId(peerId);
       return peer ? peer.name : '';
     });
   }
@@ -152,8 +159,8 @@ export class ChatInputComponent implements OnInit, OnDestroy {
       if (this.isDirect) {
         let object = ObjectStore.instance.get(this.sendTo);
         if (object instanceof PeerCursor) {
-          let peer = PeerContext.create(object.peerId);
-          if (peer) sendTo = peer.id;
+          let peer = PeerContext.parse(object.peerId);
+          if (peer) sendTo = peer.peerId;
         }
       }
       EventSystem.call('WRITING_A_MESSAGE', this.chatTabidentifier, sendTo);
@@ -263,7 +270,7 @@ export class ChatInputComponent implements OnInit, OnDestroy {
         return false;
       default:
         for (const conn of Network.peerContexts) {
-          if (conn.isOpen && gameCharacter.location.name === conn.fullstring) {
+          if (conn.isOpen && gameCharacter.location.name === conn.peerId) {
             return false;
           }
         }

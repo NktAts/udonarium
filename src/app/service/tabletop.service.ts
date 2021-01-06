@@ -26,6 +26,8 @@ import { ImageTag } from '@udonarium/image-tag';
 type ObjectIdentifier = string;
 type LocationName = string;
 
+const skeletonImage: ImageFile = ImageFile.create('./assets/images/skeleton.png');
+
 @Injectable()
 export class TabletopService {
   dragAreaElement: HTMLElement = document.body;
@@ -203,6 +205,10 @@ export class TabletopService {
         gameObject.setLocation('table');
         break;
     }
+  }
+
+  getSkeletonImageOr(image: ImageFile) {
+    return image && !image.isEmpty ? image : skeletonImage;
   }
 
   calcTabletopLocalCoordinate(
